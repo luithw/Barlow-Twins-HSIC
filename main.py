@@ -3,6 +3,7 @@ from collections import defaultdict
 import os
 
 import pandas as pd
+import numpy as np
 import torch
 import torch.optim as optim
 from thop import profile, clever_format
@@ -245,11 +246,12 @@ if __name__ == '__main__':
                     test_acc_1, test_acc_5 = test(model, feature_bank, feature_labels, test_loader, "task_%i" % t)
                     results['task_%i_test_acc@1' % t].append(test_acc_1)
                     results['task_%i_test_acc@5' % t].append(test_acc_5)
-                    # save statistics
-                    data_frame = pd.DataFrame(data=results, index=range(test_period, epoch + 1, test_period))
-                    data_frame.to_csv('results/{}_statistics.csv'.format(save_name_pre), index_label='epoch')
                     if t == task and test_acc_1 > best_acc:
                         best_acc = test_acc_1
                         torch.save(model.state_dict(), 'results/{}_model.pth'.format(save_name_pre))
+                # save statistics
+                data_frame = pd.DataFrame(data=results,
+                                          index=((np.arange(len(results['train_loss'])) + 1) * test_period).tolist())
+                data_frame.to_csv('results/{}_statistics.csv'.format(save_name_pre), index_label='epoch')
             if epoch % 50 == 0:
                 torch.save(model.state_dict(), 'results/{}_model_{}.pth'.format(save_name_pre, epoch))
