@@ -169,6 +169,17 @@ if __name__ == '__main__':
     past_feature_banks = [None] * n_tasks
     past_feature_labels = [None] * n_tasks
 
+    # model setup and optimizer config
+    model = Model(feature_dim, dataset).cuda()
+    if dataset == 'cifar10':
+        flops, params = profile(model, inputs=(torch.randn(1, 3, 32, 32).cuda(),))
+    elif dataset == 'tiny_imagenet' or dataset == 'stl10':
+        flops, params = profile(model, inputs=(torch.randn(1, 3, 64, 64).cuda(),))
+
+    flops, params = clever_format([flops, params])
+    print('# Model Params: {} FLOPs: {}'.format(params, flops))
+    optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-6)
+
     for task in range(n_tasks):
         target_class = set(range(task * CLASSES_PER_TASK, (task + 1) * CLASSES_PER_TASK))
         train_data = torch.utils.data.Subset(cifar100_train, [i for i, t in enumerate(cifar100_train.targets) if t in target_class])
@@ -179,45 +190,11 @@ if __name__ == '__main__':
         memory_data.classes = list(target_class)
         test_data.classes = list(target_class)
 
-        # # data prepare
-        # if dataset == 'cifar10':
-        #     train_data = torchvision.datasets.CIFAR10(root='data', train=True, \
-        #                                               transform=utils.CifarPairTransform(train_transform = True), download=True)
-        #     memory_data = torchvision.datasets.CIFAR10(root='data', train=True, \
-        #                                               transform=utils.CifarPairTransform(train_transform = False), download=True)
-        #     test_data = torchvision.datasets.CIFAR10(root='data', train=False, \
-        #                                               transform=utils.CifarPairTransform(train_transform = False), download=True)
-        # elif dataset == 'stl10':
-        #     train_data = torchvision.datasets.STL10(root='data', split="train+unlabeled", \
-        #                                               transform=utils.StlPairTransform(train_transform = True), download=True)
-        #     memory_data = torchvision.datasets.STL10(root='data', split="train", \
-        #                                               transform=utils.StlPairTransform(train_transform = False), download=True)
-        #     test_data = torchvision.datasets.STL10(root='data', split="test", \
-        #                                               transform=utils.StlPairTransform(train_transform = False), download=True)
-        # elif dataset == 'tiny_imagenet':
-        #     train_data = torchvision.datasets.ImageFolder('data/tiny-imagenet-200/train', \
-        #                                                   utils.TinyImageNetPairTransform(train_transform = True))
-        #     memory_data = torchvision.datasets.ImageFolder('data/tiny-imagenet-200/train', \
-        #                                                   utils.TinyImageNetPairTransform(train_transform = False))
-        #     test_data = torchvision.datasets.ImageFolder('data/tiny-imagenet-200/val', \
-        #                                                   utils.TinyImageNetPairTransform(train_transform = False))
-
         train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, num_workers=16, pin_memory=True,
                                 drop_last=True)
         memory_loader = DataLoader(memory_data, batch_size=batch_size, shuffle=False, num_workers=16, pin_memory=True)
         test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, num_workers=16, pin_memory=True)
         past_test_loaders[task] = test_loader
-
-        # model setup and optimizer config
-        model = Model(feature_dim, dataset).cuda()
-        if dataset == 'cifar10':
-            flops, params = profile(model, inputs=(torch.randn(1, 3, 32, 32).cuda(),))
-        elif dataset == 'tiny_imagenet' or dataset == 'stl10':
-            flops, params = profile(model, inputs=(torch.randn(1, 3, 64, 64).cuda(),))
-
-        flops, params = clever_format([flops, params])
-        print('# Model Params: {} FLOPs: {}'.format(params, flops))
-        optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-6)
         c = len(memory_data.classes)
 
         # training loop
