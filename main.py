@@ -163,11 +163,10 @@ if __name__ == '__main__':
     cifar100_test = torchvision.datasets.CIFAR100(root='data', train=False, \
                                               transform=utils.CifarPairTransform(train_transform = False), download=True)
 
-    past_test_loaders = []
-    past_feature_banks = []
-    past_feature_labels = []
-
     n_tasks = int(len(cifar100_train.classes) / CLASSES_PER_TASK)
+    past_test_loaders = [None] * n_tasks
+    past_feature_banks = [None] * n_tasks
+    past_feature_labels = [None] * n_tasks
 
     for task in range(n_tasks):
         target_class = set(range(task * CLASSES_PER_TASK, (task + 1) * CLASSES_PER_TASK))
@@ -206,7 +205,7 @@ if __name__ == '__main__':
                                 drop_last=True)
         memory_loader = DataLoader(memory_data, batch_size=batch_size, shuffle=False, num_workers=16, pin_memory=True)
         test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, num_workers=16, pin_memory=True)
-        past_test_loaders.append(test_loader)
+        past_test_loaders[task] = test_loader
 
         # model setup and optimizer config
         model = Model(feature_dim, dataset).cuda()
@@ -238,9 +237,11 @@ if __name__ == '__main__':
                 results['train_loss'].append(train_loss)
                 feature_bank, feature_labels = get_features(model, memory_loader)
                 # Append the features of the current task to bank
-                past_feature_banks.append(feature_bank)
-                past_feature_labels.append(feature_labels)
+                past_feature_banks[task] = feature_bank
+                past_feature_labels[task] = feature_labels
                 for t, (feature_bank, feature_labels, test_loader) in enumerate(zip(past_feature_banks, past_feature_labels, past_test_loaders)):
+                    if t > task:
+                        break
                     test_acc_1, test_acc_5 = test(model, feature_bank, feature_labels, test_loader, "task_%i" % t)
                     results['task_%i_test_acc@1' % t].append(test_acc_1)
                     results['task_%i_test_acc@5' % t].append(test_acc_5)
