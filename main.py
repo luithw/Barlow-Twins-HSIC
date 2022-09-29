@@ -1,4 +1,5 @@
 import argparse
+from collections import defaultdict
 import os
 
 import pandas as pd
@@ -16,6 +17,8 @@ import torchvision
 
 if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
+
+CLASSES_PER_TASK = 10
 
 
 def off_diagonal(x):
@@ -71,9 +74,9 @@ def train(net, data_loader, train_optimizer):
 
 
 # test for one epoch, use weighted knn to find the most similar images' label to assign the test image
-def test(net, memory_data_loader, test_data_loader):
+def get_features(net, memory_data_loader):
     net.eval()
-    total_top1, total_top5, total_num, feature_bank, target_bank = 0.0, 0.0, 0, [], []
+    feature_bank, target_bank = [], []
     with torch.no_grad():
         # generate feature bank and target bank
         for data_tuple in tqdm(memory_data_loader, desc='Feature extracting'):
@@ -85,6 +88,14 @@ def test(net, memory_data_loader, test_data_loader):
         feature_bank = torch.cat(feature_bank, dim=0).t().contiguous()
         # [N]
         feature_labels = torch.cat(target_bank, dim=0).contiguous().to(feature_bank.device)
+    return feature_bank, feature_labels
+
+
+# test for one epoch, use weighted knn to find the most similar images' label to assign the test image
+def test(net, feature_bank, feature_labels, test_data_loader, name):
+    net.eval()
+    total_top1, total_top5, total_num = 0.0, 0.0, 0.0
+    with torch.no_grad():
         # loop test data to predict the label by weighted knn search
         test_bar = tqdm(test_data_loader)
         for data_tuple in test_bar:
@@ -105,16 +116,16 @@ def test(net, memory_data_loader, test_data_loader):
             # counts for each class
             one_hot_label = torch.zeros(data.size(0) * k, c, device=sim_labels.device)
             # [B*K, C]
-            one_hot_label = one_hot_label.scatter(dim=-1, index=torch.remainder(sim_labels, 10).view(-1, 1), value=1.0)
+            one_hot_label = one_hot_label.scatter(dim=-1, index=torch.remainder(sim_labels, CLASSES_PER_TASK).view(-1, 1), value=1.0)
             # weighted score ---> [B, C]
             # The score for each test sample and for each class by summing across the top k similarities
             pred_scores = torch.sum(one_hot_label.view(data.size(0), -1, c) * sim_weight.unsqueeze(dim=-1), dim=1)
 
             pred_labels = pred_scores.argsort(dim=-1, descending=True)
-            total_top1 += torch.sum((pred_labels[:, :1] == target.unsqueeze(dim=-1)).any(dim=-1).float()).item()
-            total_top5 += torch.sum((pred_labels[:, :5] == target.unsqueeze(dim=-1)).any(dim=-1).float()).item()
-            test_bar.set_description('Test Epoch: [{}/{}] Acc@1:{:.2f}% Acc@5:{:.2f}%'
-                                     .format(epoch, epochs, total_top1 / total_num * 100, total_top5 / total_num * 100))
+            total_top1 += torch.sum((pred_labels[:, :1] == torch.remainder(target, CLASSES_PER_TASK).unsqueeze(dim=-1)).any(dim=-1).float()).item()
+            total_top5 += torch.sum((pred_labels[:, :5] == torch.remainder(target, CLASSES_PER_TASK).unsqueeze(dim=-1)).any(dim=-1).float()).item()
+            test_bar.set_description('{} Test Epoch: [{}/{}] Acc@1:{:.2f}% Acc@5:{:.2f}%'
+                                     .format(name, epoch, epochs, total_top1 / total_num * 100, total_top5 / total_num * 100))
 
     return total_top1 / total_num * 100, total_top5 / total_num * 100
 
@@ -145,14 +156,21 @@ if __name__ == '__main__':
     lmbda = args.lmbda
     corr_neg_one = args.corr_neg_one
 
-    cifar100_train = torchvision.datasets.CIFAR10(root='data', train=True, \
+    cifar100_train = torchvision.datasets.CIFAR100(root='data', train=True, \
                                               transform=utils.CifarPairTransform(train_transform = True), download=True)
-    cifar100_memory = torchvision.datasets.CIFAR10(root='data', train=True, \
+    cifar100_memory = torchvision.datasets.CIFAR100(root='data', train=True, \
                                               transform=utils.CifarPairTransform(train_transform = False), download=True)
-    cifar100_test = torchvision.datasets.CIFAR10(root='data', train=False, \
+    cifar100_test = torchvision.datasets.CIFAR100(root='data', train=False, \
                                               transform=utils.CifarPairTransform(train_transform = False), download=True)
-    for task in range(10):
-        target_class = set(range(task * 10, (task + 1) * 10))
+
+    past_test_loaders = []
+    past_feature_banks = []
+    past_feature_labels = []
+
+    n_tasks = int(len(cifar100_train.classes) / CLASSES_PER_TASK)
+
+    for task in range(n_tasks):
+        target_class = set(range(task * CLASSES_PER_TASK, (task + 1) * CLASSES_PER_TASK))
         train_data = torch.utils.data.Subset(cifar100_train, [i for i, t in enumerate(cifar100_train.targets) if t in target_class])
         memory_data = torch.utils.data.Subset(cifar100_memory, [i for i, t in enumerate(cifar100_memory.targets) if t in target_class])
         test_data = torch.utils.data.Subset(cifar100_test, [i for i, t in enumerate(cifar100_test.targets) if t in target_class])
@@ -188,6 +206,7 @@ if __name__ == '__main__':
                                 drop_last=True)
         memory_loader = DataLoader(memory_data, batch_size=batch_size, shuffle=False, num_workers=16, pin_memory=True)
         test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, num_workers=16, pin_memory=True)
+        past_test_loaders.append(test_loader)
 
         # model setup and optimizer config
         model = Model(feature_dim, dataset).cuda()
@@ -202,7 +221,7 @@ if __name__ == '__main__':
         c = len(memory_data.classes)
 
         # training loop
-        results = {'train_loss': [], 'test_acc@1': [], 'test_acc@5': []}
+        results = defaultdict(list)
         if corr_neg_one is True:
             corr_neg_one_str = 'neg_corr_'
         else:
@@ -212,18 +231,24 @@ if __name__ == '__main__':
         if not os.path.exists('results'):
             os.mkdir('results')
         best_acc = 0.0
+        test_period = 5
         for epoch in range(1, epochs + 1):
             train_loss = train(model, train_loader, optimizer)
-            if epoch % 5 == 0:
+            if epoch % test_period == 0:
                 results['train_loss'].append(train_loss)
-                test_acc_1, test_acc_5 = test(model, memory_loader, test_loader)
-                results['test_acc@1'].append(test_acc_1)
-                results['test_acc@5'].append(test_acc_5)
-                # save statistics
-                data_frame = pd.DataFrame(data=results, index=range(5, epoch + 1, 5))
-                data_frame.to_csv('results/{}_statistics.csv'.format(save_name_pre), index_label='epoch')
-                if test_acc_1 > best_acc:
-                    best_acc = test_acc_1
-                    torch.save(model.state_dict(), 'results/{}_model.pth'.format(save_name_pre))
+                feature_bank, feature_labels = get_features(model, memory_loader)
+                # Append the features of the current task to bank
+                past_feature_banks.append(feature_bank)
+                past_feature_labels.append(feature_labels)
+                for t, (feature_bank, feature_labels, test_loader) in enumerate(zip(past_feature_banks, past_feature_labels, past_test_loaders)):
+                    test_acc_1, test_acc_5 = test(model, feature_bank, feature_labels, test_loader, "task_%i" % t)
+                    results['task_%i_test_acc@1' % t].append(test_acc_1)
+                    results['task_%i_test_acc@5' % t].append(test_acc_5)
+                    # save statistics
+                    data_frame = pd.DataFrame(data=results, index=range(test_period, epoch + 1, test_period))
+                    data_frame.to_csv('results/{}_statistics.csv'.format(save_name_pre), index_label='epoch')
+                    if t == task and test_acc_1 > best_acc:
+                        best_acc = test_acc_1
+                        torch.save(model.state_dict(), 'results/{}_model.pth'.format(save_name_pre))
             if epoch % 50 == 0:
                 torch.save(model.state_dict(), 'results/{}_model_{}.pth'.format(save_name_pre, epoch))
