@@ -29,7 +29,7 @@ from torchvision import transforms
 
 
 class Model(nn.Module):
-    def __init__(self, feature_dim=128):
+    def __init__(self, feature_dim=128, n_tasks=10):
         super(Model, self).__init__()
 
         self.f = []
@@ -41,18 +41,22 @@ class Model(nn.Module):
         # encoder
         self.f = nn.Sequential(*self.f)
         # readout head
-        self.readout = nn.Sequential(nn.Linear(2048, 512), nn.BatchNorm1d(512),
-                               nn.ReLU(), nn.Linear(512, 100, bias=True))
+        self.projection = nn.Sequential(nn.Linear(2048, 512), nn.BatchNorm1d(512),
+                               nn.ReLU())
+        self.readouts = nn.ModuleList()
+        for i in range(n_tasks):
+            self.readouts.append(nn.Linear(512, 10, bias=True))
 
-    def forward(self, x):
+    def forward(self, x, task_id):
         x = self.f(x)
         feature = torch.flatten(x, start_dim=1)
-        readout = self.readout(feature)
+        feature = self.projection(feature)
+        readout = self.readouts[task_id](feature)
         return F.normalize(feature, dim=-1), readout
 
 
 # train for one epoch to learn unique features
-def train(net, data_loader, train_optimizer):
+def train(net, data_loader, train_optimizer, task_id):
     criterion = nn.CrossEntropyLoss()
     net.train()
     total_loss, total_num, train_bar = 0.0, 0, tqdm(data_loader)
@@ -60,7 +64,7 @@ def train(net, data_loader, train_optimizer):
         data, target = data_tuple
         data = data.cuda(non_blocking=True)
         target = target.cuda(non_blocking=True)
-        feature, readout = net(data)
+        feature, readout = net(data, task_id)
         loss = criterion(readout, target)
 
         train_optimizer.zero_grad()
@@ -84,8 +88,7 @@ def test(net, test_data_loader, task_id):
         for data_tuple in test_bar:
             data, target = data_tuple
             data, target = data.cuda(non_blocking=True), target.cuda(non_blocking=True)
-            feature, readout = net(data)
-            readout = readout[:, task_id * CLASSES_PER_TASK:(task_id + 1) * CLASSES_PER_TASK]
+            feature, readout = net(data, task_id)
             pred_labels = readout.argsort(dim=-1, descending=True)
             total_num += data.size(0)
             total_top1 += torch.sum((pred_labels[:, :1] == torch.remainder(target, CLASSES_PER_TASK).unsqueeze(dim=-1)).any(dim=-1).float()).item()
@@ -119,8 +122,8 @@ if __name__ == '__main__':
     n_tasks = int(len(cifar100_train.classes) / CLASSES_PER_TASK)
     past_test_loaders = [None] * n_tasks
 
-    for task in range(n_tasks):
-        target_class = set(range(task * CLASSES_PER_TASK, (task + 1) * CLASSES_PER_TASK))
+    for task_id in range(n_tasks):
+        target_class = set(range(task_id * CLASSES_PER_TASK, (task_id + 1) * CLASSES_PER_TASK))
         train_data = torch.utils.data.Subset(cifar100_train, [i for i, t in enumerate(cifar100_train.targets) if t in target_class])
         test_data = torch.utils.data.Subset(cifar100_test, [i for i, t in enumerate(cifar100_test.targets) if t in target_class])
 
@@ -130,7 +133,7 @@ if __name__ == '__main__':
         train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, num_workers=16, pin_memory=True,
                                 drop_last=True)
         test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False, num_workers=16, pin_memory=True)
-        past_test_loaders[task] = test_loader
+        past_test_loaders[task_id] = test_loader
 
         # training loop
         results = defaultdict(list)
@@ -140,16 +143,16 @@ if __name__ == '__main__':
         best_acc = 0.0
         test_period = 5
         for epoch in range(1, args.epochs + 1):
-            train_loss = train(model, train_loader, optimizer)
+            train_loss = train(model, train_loader, optimizer, task_id)
             if epoch % test_period == 0:
                 results['train_loss'].append(train_loss)
                 for t, test_loader in enumerate(past_test_loaders):
-                    if t > task:
+                    if t > task_id:
                         break
                     test_acc_1, test_acc_5 = test(model, test_loader, t)
                     results['task_%i_test_acc@1' % t].append(test_acc_1)
                     results['task_%i_test_acc@5' % t].append(test_acc_5)
-                    if t == task and test_acc_1 > best_acc:
+                    if t == task_id and test_acc_1 > best_acc:
                         best_acc = test_acc_1
                         torch.save(model.state_dict(), 'results/model.pth')
                 # save statistics
