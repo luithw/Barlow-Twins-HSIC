@@ -75,7 +75,7 @@ def train(net, data_loader, train_optimizer):
 
 
 # test for one epoch, use weighted knn to find the most similar images' label to assign the test image
-def test(net, test_data_loader, name):
+def test(net, test_data_loader, task_id):
     net.eval()
     total_top1, total_top5, total_num = 0.0, 0.0, 0.0
     with torch.no_grad():
@@ -85,12 +85,13 @@ def test(net, test_data_loader, name):
             data, target = data_tuple
             data, target = data.cuda(non_blocking=True), target.cuda(non_blocking=True)
             feature, readout = net(data)
+            readout = readout[:, task_id * CLASSES_PER_TASK:(task_id + 1) * CLASSES_PER_TASK]
             pred_labels = readout.argsort(dim=-1, descending=True)
             total_num += data.size(0)
-            total_top1 += torch.sum((pred_labels[:, :1] == target.unsqueeze(dim=-1)).any(dim=-1).float()).item()
-            total_top5 += torch.sum((pred_labels[:, :5] == target.unsqueeze(dim=-1)).any(dim=-1).float()).item()
-            test_bar.set_description('{} Test Epoch: re[{}/{}] Acc@1:{:.2f}% Acc@5:{:.2f}%'
-                                     .format(name, epoch, args.epochs, total_top1 / total_num * 100, total_top5 / total_num * 100))
+            total_top1 += torch.sum((pred_labels[:, :1] == torch.remainder(target, CLASSES_PER_TASK).unsqueeze(dim=-1)).any(dim=-1).float()).item()
+            total_top5 += torch.sum((pred_labels[:, :5] == torch.remainder(target, CLASSES_PER_TASK).unsqueeze(dim=-1)).any(dim=-1).float()).item()
+            test_bar.set_description('Task {} Test Epoch: re[{}/{}] Acc@1:{:.2f}% Acc@5:{:.2f}%'
+                                     .format(task_id, epoch, args.epochs, total_top1 / total_num * 100, total_top5 / total_num * 100))
     return total_top1 / total_num * 100, total_top5 / total_num * 100
 
 
@@ -145,7 +146,7 @@ if __name__ == '__main__':
                 for t, test_loader in enumerate(past_test_loaders):
                     if t > task:
                         break
-                    test_acc_1, test_acc_5 = test(model, test_loader, "task_%i" % t)
+                    test_acc_1, test_acc_5 = test(model, test_loader, t)
                     results['task_%i_test_acc@1' % t].append(test_acc_1)
                     results['task_%i_test_acc@5' % t].append(test_acc_5)
                     if t == task and test_acc_1 > best_acc:
