@@ -45,7 +45,7 @@ class Model(nn.Module):
                                nn.ReLU())
         self.readouts = nn.ModuleList()
         for i in range(n_tasks):
-            self.readouts.append(nn.Linear(512, 10, bias=True))
+            self.readouts.append(nn.Linear(512, CLASSES_PER_TASK, bias=True))
 
     def forward(self, x, task_id):
         x = self.f(x)
@@ -64,6 +64,7 @@ def train(net, data_loader, train_optimizer, task_id):
         data, target = data_tuple
         data = data.cuda(non_blocking=True)
         target = target.cuda(non_blocking=True)
+        target = torch.remainder(target, CLASSES_PER_TASK)
         feature, readout = net(data, task_id)
         loss = criterion(readout, target)
 
